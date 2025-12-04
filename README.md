@@ -1,6 +1,41 @@
-# Handy
+# Handy (Warren's Customized Fork)
+
+> **This is a customized fork of [cjpais/Handy](https://github.com/cjpais/Handy).**
 
 [![Discord](https://img.shields.io/badge/Discord-%235865F2.svg?style=for-the-badge&logo=discord&logoColor=white)](https://discord.com/invite/WVBeWsNXK4)
+[![Original Repo](https://img.shields.io/badge/Original-cjpais%2FHandy-blue?style=for-the-badge&logo=github)](https://github.com/cjpais/Handy)
+
+---
+
+## Why This Fork?
+
+I was using **WhisperFlow** for speech-to-text. It was nice to use, but they introduced usage limits to the free version. I didn't want to pay for something that should be free and local, so I decided to find an open-source alternative and customize it myself.
+
+And really, I was **really impressed by Handy**. It is working **much better than WhisperFlow**! Everything runs locally, it's fast, and the codebase is clean and hackable.
+
+**A huge thank you to the original development team at [cjpais/Handy](https://github.com/cjpais/Handy)**. They have done a fantastic job building this tool. Please check out their original repository and consider supporting them!
+
+---
+
+## My Customizations
+
+| Feature | Description |
+|---------|-------------|
+| **Recording Duration Timer** | Shows elapsed seconds (`5s`, `1:23`) in the recording overlay so you know how long you've been speaking |
+| **Makefile for Development** | Added `make dev`, `make release`, `make install-app` commands for easier workflow |
+
+### Quick Commands
+
+```bash
+make install      # Install dependencies (first time setup)
+make dev          # Start development server with hot reload
+make release      # Build and install to /Applications (one command!)
+make help         # Show all available commands
+```
+
+---
+
+## Original README
 
 **A free, open source, and extensible speech-to-text application that works completely offline.**
 

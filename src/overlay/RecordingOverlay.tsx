@@ -14,7 +14,9 @@ const RecordingOverlay: React.FC = () => {
   const [isVisible, setIsVisible] = useState(false);
   const [state, setState] = useState<OverlayState>("recording");
   const [levels, setLevels] = useState<number[]>(Array(16).fill(0));
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const smoothedLevelsRef = useRef<number[]>(Array(16).fill(0));
+  const timerRef = useRef<number | null>(null);
 
   useEffect(() => {
     const setupEventListeners = async () => {
@@ -23,11 +25,33 @@ const RecordingOverlay: React.FC = () => {
         const overlayState = event.payload as OverlayState;
         setState(overlayState);
         setIsVisible(true);
+
+        // Start timer when recording begins
+        if (overlayState === "recording") {
+          setElapsedSeconds(0);
+          if (timerRef.current) {
+            clearInterval(timerRef.current);
+          }
+          timerRef.current = window.setInterval(() => {
+            setElapsedSeconds((prev) => prev + 1);
+          }, 1000);
+        } else {
+          // Stop timer when transcribing
+          if (timerRef.current) {
+            clearInterval(timerRef.current);
+            timerRef.current = null;
+          }
+        }
       });
 
       // Listen for hide-overlay event from Rust
       const unlistenHide = await listen("hide-overlay", () => {
         setIsVisible(false);
+        // Stop timer when overlay hides
+        if (timerRef.current) {
+          clearInterval(timerRef.current);
+          timerRef.current = null;
+        }
       });
 
       // Listen for mic-level updates
@@ -49,11 +73,24 @@ const RecordingOverlay: React.FC = () => {
         unlistenShow();
         unlistenHide();
         unlistenLevel();
+        if (timerRef.current) {
+          clearInterval(timerRef.current);
+        }
       };
     };
 
     setupEventListeners();
   }, []);
+
+  // Format seconds as "Xs" or "M:SS" for longer durations
+  const formatTime = (seconds: number): string => {
+    if (seconds < 60) {
+      return `${seconds}s`;
+    }
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toString().padStart(2, "0")}`;
+  };
 
   const getIcon = () => {
     if (state === "recording") {
@@ -90,14 +127,17 @@ const RecordingOverlay: React.FC = () => {
 
       <div className="overlay-right">
         {state === "recording" && (
-          <div
-            className="cancel-button"
-            onClick={() => {
-              commands.cancelOperation();
-            }}
-          >
-            <CancelIcon />
-          </div>
+          <>
+            <span className="elapsed-time">{formatTime(elapsedSeconds)}</span>
+            <div
+              className="cancel-button"
+              onClick={() => {
+                commands.cancelOperation();
+              }}
+            >
+              <CancelIcon />
+            </div>
+          </>
         )}
       </div>
     </div>
