@@ -1,9 +1,12 @@
 mod actions;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+mod apple_intelligence;
 mod audio_feedback;
 pub mod audio_toolkit;
 mod clipboard;
 mod commands;
 mod helpers;
+mod input;
 mod llm_client;
 mod managers;
 mod overlay;
@@ -11,6 +14,7 @@ mod settings;
 mod shortcut;
 mod signal_handle;
 mod tray;
+mod tray_i18n;
 mod utils;
 use specta_typescript::{BigIntExportBehavior, Typescript};
 use tauri_specta::{collect_commands, Builder};
@@ -106,7 +110,12 @@ fn show_main_window(app: &AppHandle) {
 }
 
 fn initialize_core_logic(app_handle: &AppHandle) {
-    // First, initialize the managers
+    // Note: Enigo (keyboard/mouse simulation) is NOT initialized here.
+    // The frontend is responsible for calling the `initialize_enigo` command
+    // after onboarding completes. This avoids triggering permission dialogs
+    // on macOS before the user is ready.
+
+    // Initialize the managers
     let recording_manager = Arc::new(
         AudioRecordingManager::new(app_handle).expect("Failed to initialize recording manager"),
     );
@@ -125,8 +134,10 @@ fn initialize_core_logic(app_handle: &AppHandle) {
     app_handle.manage(transcription_manager.clone());
     app_handle.manage(history_manager.clone());
 
-    // Initialize the shortcuts
-    shortcut::init_shortcuts(app_handle);
+    // Note: Shortcuts are NOT initialized here.
+    // The frontend is responsible for calling the `initialize_shortcuts` command
+    // after permissions are confirmed (on macOS) or after onboarding completes.
+    // This matches the pattern used for Enigo initialization.
 
     #[cfg(unix)]
     let signals = Signals::new(&[SIGUSR2]).unwrap();
@@ -171,6 +182,9 @@ fn initialize_core_logic(app_handle: &AppHandle) {
                     let _ = app.emit("check-for-updates", ());
                 }
             }
+            "copy_last_transcript" => {
+                tray::copy_last_transcript(app);
+            }
             "cancel" => {
                 use crate::utils::cancel_current_operation;
 
@@ -187,7 +201,7 @@ fn initialize_core_logic(app_handle: &AppHandle) {
     app_handle.manage(tray);
 
     // Initialize tray menu with idle state
-    utils::update_tray_menu(app_handle, &utils::TrayIconState::Idle);
+    utils::update_tray_menu(app_handle, &utils::TrayIconState::Idle, None);
 
     // Get the autostart manager and configure based on user setting
     let autostart_manager = app_handle.autolaunch();
@@ -240,6 +254,7 @@ pub fn run() {
         shortcut::change_paste_method_setting,
         shortcut::change_clipboard_handling_setting,
         shortcut::change_post_process_enabled_setting,
+        shortcut::change_experimental_enabled_setting,
         shortcut::change_post_process_base_url_setting,
         shortcut::change_post_process_api_key_setting,
         shortcut::change_post_process_model_setting,
@@ -253,7 +268,13 @@ pub fn run() {
         shortcut::suspend_binding,
         shortcut::resume_binding,
         shortcut::change_mute_while_recording_setting,
+        shortcut::change_append_trailing_space_setting,
+        shortcut::change_app_language_setting,
         shortcut::change_update_checks_setting,
+        shortcut::change_keyboard_implementation_setting,
+        shortcut::get_keyboard_implementation,
+        shortcut::handy_keys::start_handy_keys_recording,
+        shortcut::handy_keys::stop_handy_keys_recording,
         trigger_update_check,
         commands::cancel_operation,
         commands::get_app_dir_path,
@@ -264,6 +285,9 @@ pub fn run() {
         commands::open_recordings_folder,
         commands::open_log_dir,
         commands::open_app_data_dir,
+        commands::check_apple_intelligence_available,
+        commands::initialize_enigo,
+        commands::initialize_shortcuts,
         commands::models::get_available_models,
         commands::models::get_model_info,
         commands::models::download_model,
@@ -288,6 +312,7 @@ pub fn run() {
         commands::audio::check_custom_sounds,
         commands::audio::set_clamshell_microphone,
         commands::audio::get_clamshell_microphone,
+        commands::audio::is_recording,
         commands::transcription::set_model_unload_timeout,
         commands::transcription::get_model_load_status,
         commands::transcription::unload_model_manually,
@@ -303,7 +328,7 @@ pub fn run() {
     #[cfg(debug_assertions)] // <- Only export on non-release builds
     specta_builder
         .export(
-            Typescript::default().bigint(BigIntExportBehavior::String),
+            Typescript::default().bigint(BigIntExportBehavior::Number),
             "../src/bindings.ts",
         )
         .expect("Failed to export typescript bindings");
@@ -349,14 +374,6 @@ pub fn run() {
         .plugin(tauri_plugin_macos_permissions::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::default().build())
-        .plugin(
-            tauri_plugin_sql::Builder::default()
-                .add_migrations(
-                    "sqlite:history.db",
-                    managers::history::HistoryManager::get_migrations(),
-                )
-                .build(),
-        )
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,

@@ -1,5 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import React, { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import {
   MicrophoneIcon,
   TranscriptionIcon,
@@ -7,21 +8,27 @@ import {
 } from "../components/icons";
 import "./RecordingOverlay.css";
 import { commands } from "@/bindings";
+import i18n, { syncLanguageFromSettings } from "@/i18n";
+import { getLanguageDirection } from "@/lib/utils/rtl";
 
 type OverlayState = "recording" | "transcribing";
 
 const RecordingOverlay: React.FC = () => {
+  const { t } = useTranslation();
   const [isVisible, setIsVisible] = useState(false);
   const [state, setState] = useState<OverlayState>("recording");
   const [levels, setLevels] = useState<number[]>(Array(16).fill(0));
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const smoothedLevelsRef = useRef<number[]>(Array(16).fill(0));
   const timerRef = useRef<number | null>(null);
+  const direction = getLanguageDirection(i18n.language);
 
   useEffect(() => {
     const setupEventListeners = async () => {
       // Listen for show-overlay event from Rust
-      const unlistenShow = await listen("show-overlay", (event) => {
+      const unlistenShow = await listen("show-overlay", async (event) => {
+        // Sync language from settings each time overlay is shown
+        await syncLanguageFromSettings();
         const overlayState = event.payload as OverlayState;
         setState(overlayState);
         setIsVisible(true);
@@ -101,7 +108,10 @@ const RecordingOverlay: React.FC = () => {
   };
 
   return (
-    <div className={`recording-overlay ${isVisible ? "fade-in" : ""}`}>
+    <div
+      dir={direction}
+      className={`recording-overlay ${isVisible ? "fade-in" : ""}`}
+    >
       <div className="overlay-left">{getIcon()}</div>
 
       <div className="overlay-middle">
@@ -121,7 +131,7 @@ const RecordingOverlay: React.FC = () => {
           </div>
         )}
         {state === "transcribing" && (
-          <div className="transcribing-text">Transcribing...</div>
+          <div className="transcribing-text">{t("overlay.transcribing")}</div>
         )}
       </div>
 

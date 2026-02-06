@@ -6,6 +6,9 @@ use std::collections::HashMap;
 use tauri::AppHandle;
 use tauri_plugin_store::StoreExt;
 
+pub const APPLE_INTELLIGENCE_PROVIDER_ID: &str = "apple_intelligence";
+pub const APPLE_INTELLIGENCE_DEFAULT_MODEL_ID: &str = "Apple Intelligence";
+
 #[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq, Type)]
 #[serde(rename_all = "lowercase")]
 pub enum LogLevel {
@@ -128,6 +131,7 @@ pub enum PasteMethod {
     Direct,
     None,
     ShiftInsert,
+    CtrlShiftV,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type)]
@@ -145,6 +149,24 @@ pub enum RecordingRetentionPeriod {
     Days3,
     Weeks2,
     Months3,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyboardImplementation {
+    Tauri,
+    HandyKeys,
+}
+
+impl Default for KeyboardImplementation {
+    fn default() -> Self {
+        // Default to HandyKeys only on macOS where it's well-tested.
+        // Windows and Linux use Tauri by default (handy-keys not sufficiently tested yet).
+        #[cfg(target_os = "macos")]
+        return KeyboardImplementation::HandyKeys;
+        #[cfg(not(target_os = "macos"))]
+        return KeyboardImplementation::Tauri;
+    }
 }
 
 impl Default for ModelUnloadTimeout {
@@ -285,6 +307,16 @@ pub struct AppSettings {
     pub post_process_selected_prompt_id: Option<String>,
     #[serde(default)]
     pub mute_while_recording: bool,
+    #[serde(default)]
+    pub append_trailing_space: bool,
+    #[serde(default = "default_app_language")]
+    pub app_language: String,
+    #[serde(default)]
+    pub experimental_enabled: bool,
+    #[serde(default)]
+    pub keyboard_implementation: KeyboardImplementation,
+    #[serde(default = "default_paste_delay_ms")]
+    pub paste_delay_ms: u64,
 }
 
 fn default_model() -> String {
@@ -334,6 +366,10 @@ fn default_word_correction_threshold() -> f64 {
     0.18
 }
 
+fn default_paste_delay_ms() -> u64 {
+    60
+}
+
 fn default_history_limit() -> usize {
     5
 }
@@ -354,12 +390,18 @@ fn default_post_process_enabled() -> bool {
     false
 }
 
+fn default_app_language() -> String {
+    tauri_plugin_os::locale()
+        .and_then(|l| l.split(['-', '_']).next().map(String::from))
+        .unwrap_or_else(|| "en".to_string())
+}
+
 fn default_post_process_provider_id() -> String {
     "openai".to_string()
 }
 
 fn default_post_process_providers() -> Vec<PostProcessProvider> {
-    vec![
+    let mut providers = vec![
         PostProcessProvider {
             id: "openai".to_string(),
             label: "OpenAI".to_string(),
@@ -382,13 +424,46 @@ fn default_post_process_providers() -> Vec<PostProcessProvider> {
             models_endpoint: Some("/models".to_string()),
         },
         PostProcessProvider {
-            id: "custom".to_string(),
-            label: "Custom".to_string(),
-            base_url: "http://localhost:11434/v1".to_string(),
-            allow_base_url_edit: true,
+            id: "groq".to_string(),
+            label: "Groq".to_string(),
+            base_url: "https://api.groq.com/openai/v1".to_string(),
+            allow_base_url_edit: false,
             models_endpoint: Some("/models".to_string()),
         },
-    ]
+        PostProcessProvider {
+            id: "cerebras".to_string(),
+            label: "Cerebras".to_string(),
+            base_url: "https://api.cerebras.ai/v1".to_string(),
+            allow_base_url_edit: false,
+            models_endpoint: Some("/models".to_string()),
+        },
+    ];
+
+    // Note: We always include Apple Intelligence on macOS ARM64 without checking availability
+    // at startup. The availability check is deferred to when the user actually tries to use it
+    // (in actions.rs). This prevents crashes on macOS 26.x beta where accessing
+    // SystemLanguageModel.default during early app initialization causes SIGABRT.
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        providers.push(PostProcessProvider {
+            id: APPLE_INTELLIGENCE_PROVIDER_ID.to_string(),
+            label: "Apple Intelligence".to_string(),
+            base_url: "apple-intelligence://local".to_string(),
+            allow_base_url_edit: false,
+            models_endpoint: None,
+        });
+    }
+
+    // Custom provider always comes last
+    providers.push(PostProcessProvider {
+        id: "custom".to_string(),
+        label: "Custom".to_string(),
+        base_url: "http://localhost:11434/v1".to_string(),
+        allow_base_url_edit: true,
+        models_endpoint: Some("/models".to_string()),
+    });
+
+    providers
 }
 
 fn default_post_process_api_keys() -> HashMap<String, String> {
@@ -399,10 +474,20 @@ fn default_post_process_api_keys() -> HashMap<String, String> {
     map
 }
 
+fn default_model_for_provider(provider_id: &str) -> String {
+    if provider_id == APPLE_INTELLIGENCE_PROVIDER_ID {
+        return APPLE_INTELLIGENCE_DEFAULT_MODEL_ID.to_string();
+    }
+    String::new()
+}
+
 fn default_post_process_models() -> HashMap<String, String> {
     let mut map = HashMap::new();
     for provider in default_post_process_providers() {
-        map.insert(provider.id, String::new());
+        map.insert(
+            provider.id.clone(),
+            default_model_for_provider(&provider.id),
+        );
     }
     map
 }
@@ -413,6 +498,45 @@ fn default_post_process_prompts() -> Vec<LLMPrompt> {
         name: "Improve Transcriptions".to_string(),
         prompt: "Clean this transcript:\n1. Fix spelling, capitalization, and punctuation errors\n2. Convert number words to digits (twenty-five → 25, ten percent → 10%, five dollars → $5)\n3. Replace spoken punctuation with symbols (period → ., comma → ,, question mark → ?)\n4. Remove filler words (um, uh, like as filler)\n5. Keep the language in the original version (if it was french, keep it in french for example)\n\nPreserve exact meaning and word order. Do not paraphrase or reorder content.\n\nReturn only the cleaned transcript.\n\nTranscript:\n${output}".to_string(),
     }]
+}
+
+fn ensure_post_process_defaults(settings: &mut AppSettings) -> bool {
+    let mut changed = false;
+    for provider in default_post_process_providers() {
+        if settings
+            .post_process_providers
+            .iter()
+            .all(|existing| existing.id != provider.id)
+        {
+            settings.post_process_providers.push(provider.clone());
+            changed = true;
+        }
+
+        if !settings.post_process_api_keys.contains_key(&provider.id) {
+            settings
+                .post_process_api_keys
+                .insert(provider.id.clone(), String::new());
+            changed = true;
+        }
+
+        let default_model = default_model_for_provider(&provider.id);
+        match settings.post_process_models.get_mut(&provider.id) {
+            Some(existing) => {
+                if existing.is_empty() && !default_model.is_empty() {
+                    *existing = default_model.clone();
+                    changed = true;
+                }
+            }
+            None => {
+                settings
+                    .post_process_models
+                    .insert(provider.id.clone(), default_model);
+                changed = true;
+            }
+        }
+    }
+
+    changed
 }
 
 pub const SETTINGS_STORE_PATH: &str = "settings_store.json";
@@ -436,6 +560,26 @@ pub fn get_default_settings() -> AppSettings {
             description: "Converts your speech into text.".to_string(),
             default_binding: default_shortcut.to_string(),
             current_binding: default_shortcut.to_string(),
+        },
+    );
+    #[cfg(target_os = "windows")]
+    let default_post_process_shortcut = "ctrl+shift+space";
+    #[cfg(target_os = "macos")]
+    let default_post_process_shortcut = "option+shift+space";
+    #[cfg(target_os = "linux")]
+    let default_post_process_shortcut = "ctrl+shift+space";
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    let default_post_process_shortcut = "alt+shift+space";
+
+    bindings.insert(
+        "transcribe_with_post_process".to_string(),
+        ShortcutBinding {
+            id: "transcribe_with_post_process".to_string(),
+            name: "Transcribe with Post-Processing".to_string(),
+            description: "Converts your speech into text and applies AI post-processing."
+                .to_string(),
+            default_binding: default_post_process_shortcut.to_string(),
+            current_binding: default_post_process_shortcut.to_string(),
         },
     );
     bindings.insert(
@@ -483,6 +627,11 @@ pub fn get_default_settings() -> AppSettings {
         post_process_prompts: default_post_process_prompts(),
         post_process_selected_prompt_id: None,
         mute_while_recording: false,
+        append_trailing_space: false,
+        app_language: default_app_language(),
+        experimental_enabled: false,
+        keyboard_implementation: KeyboardImplementation::default(),
+        paste_delay_ms: default_paste_delay_ms(),
     }
 }
 
@@ -515,7 +664,7 @@ pub fn load_or_create_app_settings(app: &AppHandle) -> AppSettings {
         .store(SETTINGS_STORE_PATH)
         .expect("Failed to initialize store");
 
-    let settings = if let Some(settings_value) = store.get("settings") {
+    let mut settings = if let Some(settings_value) = store.get("settings") {
         // Parse the entire settings object
         match serde_json::from_value::<AppSettings>(settings_value) {
             Ok(mut settings) => {
@@ -553,6 +702,10 @@ pub fn load_or_create_app_settings(app: &AppHandle) -> AppSettings {
         default_settings
     };
 
+    if ensure_post_process_defaults(&mut settings) {
+        store.set("settings", serde_json::to_value(&settings).unwrap());
+    }
+
     settings
 }
 
@@ -561,7 +714,7 @@ pub fn get_settings(app: &AppHandle) -> AppSettings {
         .store(SETTINGS_STORE_PATH)
         .expect("Failed to initialize store");
 
-    if let Some(settings_value) = store.get("settings") {
+    let mut settings = if let Some(settings_value) = store.get("settings") {
         serde_json::from_value::<AppSettings>(settings_value).unwrap_or_else(|_| {
             let default_settings = get_default_settings();
             store.set("settings", serde_json::to_value(&default_settings).unwrap());
@@ -571,7 +724,13 @@ pub fn get_settings(app: &AppHandle) -> AppSettings {
         let default_settings = get_default_settings();
         store.set("settings", serde_json::to_value(&default_settings).unwrap());
         default_settings
+    };
+
+    if ensure_post_process_defaults(&mut settings) {
+        store.set("settings", serde_json::to_value(&settings).unwrap());
     }
+
+    settings
 }
 
 pub fn write_settings(app: &AppHandle, settings: AppSettings) {

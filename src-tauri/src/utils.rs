@@ -1,4 +1,5 @@
 use crate::managers::audio::AudioRecordingManager;
+use crate::managers::transcription::TranscriptionManager;
 use crate::shortcut;
 use crate::ManagedToggleState;
 use log::{info, warn};
@@ -36,6 +37,10 @@ pub fn cancel_current_operation(app: &AppHandle) {
     change_tray_icon(app, crate::tray::TrayIconState::Idle);
     hide_recording_overlay(app);
 
+    // Unload model if immediate unload is enabled
+    let tm = app.state::<Arc<TranscriptionManager>>();
+    tm.maybe_unload_immediately("cancellation");
+
     info!("Operation cancellation completed - returned to idle state");
 }
 
@@ -46,4 +51,19 @@ pub fn is_wayland() -> bool {
         || std::env::var("XDG_SESSION_TYPE")
             .map(|v| v.to_lowercase() == "wayland")
             .unwrap_or(false)
+}
+
+/// Check if running on KDE Plasma desktop environment
+#[cfg(target_os = "linux")]
+pub fn is_kde_plasma() -> bool {
+    std::env::var("XDG_CURRENT_DESKTOP")
+        .map(|v| v.to_uppercase().contains("KDE"))
+        .unwrap_or(false)
+        || std::env::var("KDE_SESSION_VERSION").is_ok()
+}
+
+/// Check if running on KDE Plasma with Wayland
+#[cfg(target_os = "linux")]
+pub fn is_kde_wayland() -> bool {
+    is_wayland() && is_kde_plasma()
 }

@@ -1,31 +1,39 @@
 import React, { useState, useEffect, useCallback } from "react";
+import { useTranslation } from "react-i18next";
 import { AudioPlayer } from "../../ui/AudioPlayer";
 import { Button } from "../../ui/Button";
 import { Copy, Star, Check, Trash2, FolderOpen } from "lucide-react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { readFile } from "@tauri-apps/plugin-fs";
 import { commands, type HistoryEntry } from "@/bindings";
+import { formatDateTime } from "@/utils/dateFormat";
+import { useOsType } from "@/hooks/useOsType";
 
 interface OpenRecordingsButtonProps {
   onClick: () => void;
+  label: string;
 }
 
 const OpenRecordingsButton: React.FC<OpenRecordingsButtonProps> = ({
   onClick,
+  label,
 }) => (
   <Button
     onClick={onClick}
     variant="secondary"
     size="sm"
     className="flex items-center gap-2"
-    title="Open recordings folder"
+    title={label}
   >
     <FolderOpen className="w-4 h-4" />
-    <span>Open Recordings Folder</span>
+    <span>{label}</span>
   </Button>
 );
 
 export const HistorySettings: React.FC = () => {
+  const { t } = useTranslation();
+  const osType = useOsType();
   const [historyEntries, setHistoryEntries] = useState<HistoryEntry[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -67,7 +75,7 @@ export const HistorySettings: React.FC = () => {
     };
   }, [loadHistoryEntries]);
 
-  const toggleSaved = async (id: string) => {
+  const toggleSaved = async (id: number) => {
     try {
       await commands.toggleHistoryEntrySaved(id);
       // No need to reload here - the event listener will handle it
@@ -84,20 +92,30 @@ export const HistorySettings: React.FC = () => {
     }
   };
 
-  const getAudioUrl = async (fileName: string) => {
-    try {
-      const result = await commands.getAudioFilePath(fileName);
-      if (result.status === "ok") {
-        return convertFileSrc(`${result.data}`, "asset");
-      }
-      return null;
-    } catch (error) {
-      console.error("Failed to get audio file path:", error);
-      return null;
-    }
-  };
+  const getAudioUrl = useCallback(
+    async (fileName: string) => {
+      try {
+        const result = await commands.getAudioFilePath(fileName);
+        if (result.status === "ok") {
+          if (osType === "linux") {
+            const fileData = await readFile(result.data);
+            const blob = new Blob([fileData], { type: "audio/wav" });
 
-  const deleteAudioEntry = async (id: string) => {
+            return URL.createObjectURL(blob);
+          }
+
+          return convertFileSrc(result.data, "asset");
+        }
+        return null;
+      } catch (error) {
+        console.error("Failed to get audio file path:", error);
+        return null;
+      }
+    },
+    [osType],
+  );
+
+  const deleteAudioEntry = async (id: number) => {
     try {
       await commands.deleteHistoryEntry(id);
     } catch (error) {
@@ -121,14 +139,17 @@ export const HistorySettings: React.FC = () => {
           <div className="px-4 flex items-center justify-between">
             <div>
               <h2 className="text-xs font-medium text-mid-gray uppercase tracking-wide">
-                History
+                {t("settings.history.title")}
               </h2>
             </div>
-            <OpenRecordingsButton onClick={openRecordingsFolder} />
+            <OpenRecordingsButton
+              onClick={openRecordingsFolder}
+              label={t("settings.history.openFolder")}
+            />
           </div>
           <div className="bg-background border border-mid-gray/20 rounded-lg overflow-visible">
             <div className="px-4 py-3 text-center text-text/60">
-              Loading history...
+              {t("settings.history.loading")}
             </div>
           </div>
         </div>
@@ -143,14 +164,17 @@ export const HistorySettings: React.FC = () => {
           <div className="px-4 flex items-center justify-between">
             <div>
               <h2 className="text-xs font-medium text-mid-gray uppercase tracking-wide">
-                History
+                {t("settings.history.title")}
               </h2>
             </div>
-            <OpenRecordingsButton onClick={openRecordingsFolder} />
+            <OpenRecordingsButton
+              onClick={openRecordingsFolder}
+              label={t("settings.history.openFolder")}
+            />
           </div>
           <div className="bg-background border border-mid-gray/20 rounded-lg overflow-visible">
             <div className="px-4 py-3 text-center text-text/60">
-              No transcriptions yet. Start recording to build your history!
+              {t("settings.history.empty")}
             </div>
           </div>
         </div>
@@ -164,10 +188,13 @@ export const HistorySettings: React.FC = () => {
         <div className="px-4 flex items-center justify-between">
           <div>
             <h2 className="text-xs font-medium text-mid-gray uppercase tracking-wide">
-              History
+              {t("settings.history.title")}
             </h2>
           </div>
-          <OpenRecordingsButton onClick={openRecordingsFolder} />
+          <OpenRecordingsButton
+            onClick={openRecordingsFolder}
+            label={t("settings.history.openFolder")}
+          />
         </div>
         <div className="bg-background border border-mid-gray/20 rounded-lg overflow-visible">
           <div className="divide-y divide-mid-gray/20">
@@ -193,7 +220,7 @@ interface HistoryEntryProps {
   onToggleSaved: () => void;
   onCopyText: () => void;
   getAudioUrl: (fileName: string) => Promise<string | null>;
-  deleteAudio: (id: string) => Promise<void>;
+  deleteAudio: (id: number) => Promise<void>;
 }
 
 const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
@@ -203,16 +230,13 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
   getAudioUrl,
   deleteAudio,
 }) => {
-  const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const { t, i18n } = useTranslation();
   const [showCopied, setShowCopied] = useState(false);
 
-  useEffect(() => {
-    const loadAudio = async () => {
-      const url = await getAudioUrl(entry.file_name);
-      setAudioUrl(url);
-    };
-    loadAudio();
-  }, [entry.file_name, getAudioUrl]);
+  const handleLoadAudio = useCallback(
+    () => getAudioUrl(entry.file_name),
+    [getAudioUrl, entry.file_name],
+  );
 
   const handleCopyText = () => {
     onCopyText();
@@ -229,15 +253,17 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
     }
   };
 
+  const formattedDate = formatDateTime(String(entry.timestamp), i18n.language);
+
   return (
     <div className="px-4 py-2 pb-5 flex flex-col gap-3">
       <div className="flex justify-between items-center">
-        <p className="text-sm font-medium">{entry.title}</p>
+        <p className="text-sm font-medium">{formattedDate}</p>
         <div className="flex items-center gap-1">
           <button
             onClick={handleCopyText}
             className="text-text/50 hover:text-logo-primary  hover:border-logo-primary transition-colors cursor-pointer"
-            title="Copy transcription to clipboard"
+            title={t("settings.history.copyToClipboard")}
           >
             {showCopied ? (
               <Check width={16} height={16} />
@@ -252,7 +278,11 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
                 ? "text-logo-primary hover:text-logo-primary/80"
                 : "text-text/50 hover:text-logo-primary"
             }`}
-            title={entry.saved ? "Remove from saved" : "Save transcription"}
+            title={
+              entry.saved
+                ? t("settings.history.unsave")
+                : t("settings.history.save")
+            }
           >
             <Star
               width={16}
@@ -263,16 +293,16 @@ const HistoryEntryComponent: React.FC<HistoryEntryProps> = ({
           <button
             onClick={handleDeleteEntry}
             className="text-text/50 hover:text-logo-primary transition-colors cursor-pointer"
-            title="Delete entry"
+            title={t("settings.history.delete")}
           >
             <Trash2 width={16} height={16} />
           </button>
         </div>
       </div>
-      <p className="italic text-text/90 text-sm pb-2">
+      <p className="italic text-text/90 text-sm pb-2 select-text cursor-text">
         {entry.transcription_text}
       </p>
-      {audioUrl && <AudioPlayer src={audioUrl} className="w-full" />}
+      <AudioPlayer onLoadRequest={handleLoadAudio} className="w-full" />
     </div>
   );
 };

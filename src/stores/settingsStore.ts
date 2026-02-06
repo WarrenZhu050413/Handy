@@ -114,14 +114,19 @@ const settingUpdaters: {
   paste_method: (value) => commands.changePasteMethodSetting(value as string),
   clipboard_handling: (value) =>
     commands.changeClipboardHandlingSetting(value as string),
-  history_limit: (value) => commands.updateHistoryLimit(value as string),
+  history_limit: (value) => commands.updateHistoryLimit(value as number),
   post_process_enabled: (value) =>
     commands.changePostProcessEnabledSetting(value as boolean),
   post_process_selected_prompt_id: (value) =>
     commands.setPostProcessSelectedPrompt(value as string),
   mute_while_recording: (value) =>
     commands.changeMuteWhileRecordingSetting(value as boolean),
+  append_trailing_space: (value) =>
+    commands.changeAppendTrailingSpaceSetting(value as boolean),
   log_level: (value) => commands.setLogLevel(value as any),
+  app_language: (value) => commands.changeAppLanguageSetting(value as string),
+  experimental_enabled: (value) =>
+    commands.changeExperimentalEnabledSetting(value as boolean),
 };
 
 export const useSettingsStore = create<SettingsStore>()(
@@ -304,7 +309,17 @@ export const useSettingsStore = create<SettingsStore>()(
             : null,
         }));
 
-        await commands.changeBinding(id, binding);
+        const result = await commands.changeBinding(id, binding);
+
+        // Check if the command executed successfully
+        if (result.status === "error") {
+          throw new Error(result.error);
+        }
+
+        // Check if the binding change was successful
+        if (!result.data.success) {
+          throw new Error(result.data.error || "Failed to update binding");
+        }
       } catch (error) {
         console.error(`Failed to update binding ${id}:`, error);
 
@@ -325,6 +340,9 @@ export const useSettingsStore = create<SettingsStore>()(
               : null,
           }));
         }
+
+        // Re-throw to let the caller know it failed
+        throw error;
       } finally {
         setUpdating(updateKey, false);
       }
@@ -477,18 +495,15 @@ export const useSettingsStore = create<SettingsStore>()(
 
     // Initialize everything
     initialize: async () => {
-      const {
-        refreshSettings,
-        refreshAudioDevices,
-        refreshOutputDevices,
-        checkCustomSounds,
-        loadDefaultSettings,
-      } = get();
+      const { refreshSettings, checkCustomSounds, loadDefaultSettings } = get();
+
+      // Note: Audio devices are NOT refreshed here. The frontend (App.tsx)
+      // is responsible for calling refreshAudioDevices/refreshOutputDevices
+      // after onboarding completes. This avoids triggering permission dialogs
+      // on macOS before the user is ready.
       await Promise.all([
         loadDefaultSettings(),
         refreshSettings(),
-        refreshAudioDevices(),
-        refreshOutputDevices(),
         checkCustomSounds(),
       ]);
     },

@@ -1,15 +1,14 @@
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+use crate::apple_intelligence;
 use crate::audio_feedback::{play_feedback_sound, play_feedback_sound_blocking, SoundType};
 use crate::managers::audio::AudioRecordingManager;
 use crate::managers::history::HistoryManager;
 use crate::managers::transcription::TranscriptionManager;
-use crate::settings::{get_settings, AppSettings};
+use crate::settings::{get_settings, AppSettings, APPLE_INTELLIGENCE_PROVIDER_ID};
 use crate::shortcut;
 use crate::tray::{change_tray_icon, TrayIconState};
 use crate::utils::{self, show_recording_overlay, show_transcribing_overlay};
-use async_openai::types::{
-    ChatCompletionRequestMessage, ChatCompletionRequestUserMessageArgs,
-    CreateChatCompletionRequestArgs,
-};
+use crate::ManagedToggleState;
 use ferrous_opencc::{config::BuiltinConfig, OpenCC};
 use log::{debug, error};
 use once_cell::sync::Lazy;
@@ -26,16 +25,11 @@ pub trait ShortcutAction: Send + Sync {
 }
 
 // Transcribe Action
-struct TranscribeAction;
+struct TranscribeAction {
+    post_process: bool,
+}
 
-async fn maybe_post_process_transcription(
-    settings: &AppSettings,
-    transcription: &str,
-) -> Option<String> {
-    if !settings.post_process_enabled {
-        return None;
-    }
-
+async fn post_process_transcription(settings: &AppSettings, transcription: &str) -> Option<String> {
     let provider = match settings.active_post_process_provider().cloned() {
         Some(provider) => provider,
         None => {
@@ -86,12 +80,6 @@ async fn maybe_post_process_transcription(
         return None;
     }
 
-    let api_key = settings
-        .post_process_api_keys
-        .get(&provider.id)
-        .cloned()
-        .unwrap_or_default();
-
     debug!(
         "Starting LLM post-processing with provider '{}' (model: {})",
         provider.id, model
@@ -101,52 +89,67 @@ async fn maybe_post_process_transcription(
     let processed_prompt = prompt.replace("${output}", transcription);
     debug!("Processed prompt length: {} chars", processed_prompt.len());
 
-    // Create OpenAI-compatible client
-    let client = match crate::llm_client::create_client(&provider, api_key) {
-        Ok(client) => client,
-        Err(e) => {
-            error!("Failed to create LLM client: {}", e);
-            return None;
-        }
-    };
-
-    // Build the chat completion request
-    let message = match ChatCompletionRequestUserMessageArgs::default()
-        .content(processed_prompt)
-        .build()
-    {
-        Ok(msg) => ChatCompletionRequestMessage::User(msg),
-        Err(e) => {
-            error!("Failed to build chat message: {}", e);
-            return None;
-        }
-    };
-
-    let request = match CreateChatCompletionRequestArgs::default()
-        .model(&model)
-        .messages(vec![message])
-        .build()
-    {
-        Ok(req) => req,
-        Err(e) => {
-            error!("Failed to build chat completion request: {}", e);
-            return None;
-        }
-    };
-
-    // Send the request
-    match client.chat().create(request).await {
-        Ok(response) => {
-            if let Some(choice) = response.choices.first() {
-                if let Some(content) = &choice.message.content {
-                    debug!(
-                        "LLM post-processing succeeded for provider '{}'. Output length: {} chars",
-                        provider.id,
-                        content.len()
-                    );
-                    return Some(content.clone());
-                }
+    if provider.id == APPLE_INTELLIGENCE_PROVIDER_ID {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        {
+            if !apple_intelligence::check_apple_intelligence_availability() {
+                debug!("Apple Intelligence selected but not currently available on this device");
+                return None;
             }
+
+            let token_limit = model.trim().parse::<i32>().unwrap_or(0);
+            return match apple_intelligence::process_text(&processed_prompt, token_limit) {
+                Ok(result) => {
+                    if result.trim().is_empty() {
+                        debug!("Apple Intelligence returned an empty response");
+                        None
+                    } else {
+                        debug!(
+                            "Apple Intelligence post-processing succeeded. Output length: {} chars",
+                            result.len()
+                        );
+                        Some(result)
+                    }
+                }
+                Err(err) => {
+                    error!("Apple Intelligence post-processing failed: {}", err);
+                    None
+                }
+            };
+        }
+
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        {
+            debug!("Apple Intelligence provider selected on unsupported platform");
+            return None;
+        }
+    }
+
+    let api_key = settings
+        .post_process_api_keys
+        .get(&provider.id)
+        .cloned()
+        .unwrap_or_default();
+
+    // Send the chat completion request
+    match crate::llm_client::send_chat_completion(&provider, api_key, &model, processed_prompt)
+        .await
+    {
+        Ok(Some(content)) => {
+            // Strip invisible Unicode characters that some LLMs (e.g., Qwen) may insert
+            let content = content
+                .replace('\u{200B}', "") // Zero-Width Space
+                .replace('\u{200C}', "") // Zero-Width Non-Joiner
+                .replace('\u{200D}', "") // Zero-Width Joiner
+                .replace('\u{FEFF}', ""); // Byte Order Mark / Zero-Width No-Break Space
+            debug!(
+                "LLM post-processing succeeded for provider '{}'. Output length: {} chars",
+                provider.id,
+                content.len()
+            );
+            Some(content)
+        }
+        Ok(None) => {
             error!("LLM API response has no content");
             None
         }
@@ -297,6 +300,7 @@ impl ShortcutAction for TranscribeAction {
         play_feedback_sound(app, SoundType::Stop);
 
         let binding_id = binding_id.to_string(); // Clone binding_id for the async task
+        let post_process = self.post_process;
 
         tauri::async_runtime::spawn(async move {
             let binding_id = binding_id.clone(); // Clone for the inner async task
@@ -332,15 +336,19 @@ impl ShortcutAction for TranscribeAction {
                             if let Some(converted_text) =
                                 maybe_convert_chinese_variant(&settings, &transcription).await
                             {
-                                final_text = converted_text.clone();
-                                post_processed_text = Some(converted_text);
+                                final_text = converted_text;
                             }
-                            // Then apply regular post-processing if enabled
-                            else if let Some(processed_text) =
-                                maybe_post_process_transcription(&settings, &transcription).await
-                            {
-                                final_text = processed_text.clone();
-                                post_processed_text = Some(processed_text);
+
+                            // Then apply LLM post-processing if this is the post-process hotkey
+                            // Uses final_text which may already have Chinese conversion applied
+                            let processed = if post_process {
+                                post_process_transcription(&settings, &final_text).await
+                            } else {
+                                None
+                            };
+                            if let Some(processed_text) = processed {
+                                post_processed_text = Some(processed_text.clone());
+                                final_text = processed_text;
 
                                 // Get the prompt that was used
                                 if let Some(prompt_id) = &settings.post_process_selected_prompt_id {
@@ -352,6 +360,9 @@ impl ShortcutAction for TranscribeAction {
                                         post_process_prompt = Some(prompt.prompt.clone());
                                     }
                                 }
+                            } else if final_text != transcription {
+                                // Chinese conversion was applied but no LLM post-processing
+                                post_processed_text = Some(final_text.clone());
                             }
 
                             // Save to history with post-processed text and prompt
@@ -407,6 +418,11 @@ impl ShortcutAction for TranscribeAction {
                 utils::hide_recording_overlay(&ah);
                 change_tray_icon(&ah, TrayIconState::Idle);
             }
+
+            // Clear toggle state now that transcription is complete
+            if let Ok(mut states) = ah.state::<ManagedToggleState>().lock() {
+                states.active_toggles.insert(binding_id, false);
+            }
         });
 
         debug!(
@@ -457,7 +473,13 @@ pub static ACTION_MAP: Lazy<HashMap<String, Arc<dyn ShortcutAction>>> = Lazy::ne
     let mut map = HashMap::new();
     map.insert(
         "transcribe".to_string(),
-        Arc::new(TranscribeAction) as Arc<dyn ShortcutAction>,
+        Arc::new(TranscribeAction {
+            post_process: false,
+        }) as Arc<dyn ShortcutAction>,
+    );
+    map.insert(
+        "transcribe_with_post_process".to_string(),
+        Arc::new(TranscribeAction { post_process: true }) as Arc<dyn ShortcutAction>,
     );
     map.insert(
         "cancel".to_string(),

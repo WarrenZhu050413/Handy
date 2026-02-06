@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from "react";
+import { useTranslation } from "react-i18next";
 import { commands } from "@/bindings";
 import { SettingContainer } from "../ui/SettingContainer";
-import { Button } from "../ui/Button";
+import { PathDisplay } from "../ui/PathDisplay";
 
 interface AppDataDirectoryProps {
   descriptionMode?: "tooltip" | "inline";
@@ -12,6 +13,7 @@ export const AppDataDirectory: React.FC<AppDataDirectoryProps> = ({
   descriptionMode = "inline",
   grouped = false,
 }) => {
+  const { t } = useTranslation();
   const [appDirPath, setAppDirPath] = useState<string>("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -59,7 +61,7 @@ export const AppDataDirectory: React.FC<AppDataDirectoryProps> = ({
     return (
       <div className="p-4 bg-red-50 border border-red-200 rounded-lg">
         <p className="text-red-600 text-sm">
-          Error loading app directory: {error}
+          {t("errors.loadDirectory", { error })}
         </p>
       </div>
     );
@@ -67,26 +69,17 @@ export const AppDataDirectory: React.FC<AppDataDirectoryProps> = ({
 
   return (
     <SettingContainer
-      title="App Data Directory"
-      description="Main directory where application data, settings, and models are stored"
+      title={t("settings.about.appDataDirectory.title")}
+      description={t("settings.about.appDataDirectory.description")}
       descriptionMode={descriptionMode}
       grouped={grouped}
       layout="stacked"
     >
-      <div className="flex items-center gap-2">
-        <div className="flex-1 min-w-0 px-2 py-2 bg-mid-gray/10 border border-mid-gray/80 rounded text-xs font-mono break-all">
-          {appDirPath}
-        </div>
-        <Button
-          onClick={handleOpen}
-          variant="secondary"
-          size="sm"
-          disabled={!appDirPath}
-          className="px-3 py-2"
-        >
-          Open
-        </Button>
-      </div>
+      <PathDisplay
+        path={appDirPath}
+        onOpen={handleOpen}
+        disabled={!appDirPath}
+      />
     </SettingContainer>
   );
 };
